@@ -508,7 +508,7 @@ def save_json(all_results: list[dict], args: argparse.Namespace, output_dir: str
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Benchmark F5-TTS: true-batched pth vs vllm")
-    p.add_argument("--backend", nargs="+", default=["pth"], choices=["pth", "vllm"])
+    p.add_argument("--backend", nargs="+", default=["pth", "vllm"], choices=["pth", "vllm"])
     p.add_argument("--model", default="F5TTS_v1_Base")
     p.add_argument("--ckpt-file", default="")
     p.add_argument("--vocab-file", default="")
@@ -635,21 +635,20 @@ def main() -> None:
     # ── vLLM backend ──
     if "vllm" in args.backend:
         if not args.vllm_command:
-            print("\nERROR: --vllm-command is required when benchmarking the vllm backend")
-            sys.exit(1)
-
-        print(f"\nBenchmarking vLLM (sequential requests) ...")
-        vllm_results = benchmark_vllm(
-            command_template=args.vllm_command,
-            ref_audio_path=args.ref_audio,
-            ref_text=args.ref_text,
-            gen_text=GEN_TEXT,
-            batch_sizes=args.batch_sizes,
-            gpu_id=gpu_id,
-            num_repeats=args.repeats,
-            warmup=args.warmup_runs,
-        )
-        all_results.extend(vllm_results)
+            print("\nSkipping vllm backend (no --vllm-command provided)")
+        else:
+            print(f"\nBenchmarking vLLM (sequential requests) ...")
+            vllm_results = benchmark_vllm(
+                command_template=args.vllm_command,
+                ref_audio_path=args.ref_audio,
+                ref_text=args.ref_text,
+                gen_text=GEN_TEXT,
+                batch_sizes=args.batch_sizes,
+                gpu_id=gpu_id,
+                num_repeats=args.repeats,
+                warmup=args.warmup_runs,
+            )
+            all_results.extend(vllm_results)
 
     # ── Output ──
     print_table(all_results)

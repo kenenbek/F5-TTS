@@ -26,31 +26,37 @@ sequential subprocess invocations (reflecting real serving latency).
 
 ## Quick start
 
-### PyTorch only
+### Default (both backends)
+
+By default the script benchmarks **both** pth and vllm.  If `--vllm-command`
+is not provided, vllm is skipped with a message.
 
 ```bash
-python benchmarks/benchmark.py \
-  --backend pth \
-  --device cuda \
-  --batch-sizes 1 2 4 8 16 32
-```
+# Runs pth, skips vllm (no command given)
+python benchmarks/benchmark.py --device cuda
 
-### pth vs vllm
-
-```bash
-python benchmarks/benchmark.py \
-  --backend pth vllm \
-  --device cuda \
+# Runs both pth and vllm
+python benchmarks/benchmark.py --device cuda \
   --vllm-command 'python your_vllm_infer.py \
       --ref-audio {ref_audio_q} --ref-text {ref_text_q} \
       --gen-text {gen_text_q} --output {output_wav_q}'
+```
+
+### Single backend
+
+```bash
+# PyTorch only
+python benchmarks/benchmark.py --backend pth --device cuda
+
+# vLLM only
+python benchmarks/benchmark.py --backend vllm --device cuda \
+  --vllm-command '...'
 ```
 
 ### Custom text / model
 
 ```bash
 python benchmarks/benchmark.py \
-  --backend pth \
   --device cuda \
   --model F5TTS_v1_Base \
   --ckpt-file /path/to/model_1250000.safetensors \
@@ -63,7 +69,7 @@ python benchmarks/benchmark.py \
 
 | Flag | Default | Description |
 |---|---|---|
-| `--backend` | `pth` | Backends to benchmark (`pth`, `vllm`, or both) |
+| `--backend` | `pth vllm` | Backends to benchmark (`pth`, `vllm`, or both) |
 | `--model` | `F5TTS_v1_Base` | Model config name |
 | `--ckpt-file` | auto (HuggingFace) | Checkpoint path |
 | `--vocab-file` | `""` | Optional vocab file |
@@ -76,7 +82,7 @@ python benchmarks/benchmark.py \
 | `--cfg-strength` | `2.0` | Classifier-free guidance strength |
 | `--sway-sampling-coef` | `-1.0` | Sway sampling coefficient |
 | `--seed` | `1234` | Random seed |
-| `--vllm-command` | `""` | Shell command template (required for vllm backend) |
+| `--vllm-command` | `""` | Shell command template (vllm skipped if not provided) |
 | `--output-dir` | `benchmarks/results/` | Output directory |
 | `--gpu-id` | `0` | GPU device index |
 | `--no-csv` | off | Skip CSV output |
