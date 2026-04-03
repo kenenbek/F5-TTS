@@ -1,14 +1,27 @@
 [
   {
-    "id": "short",
+    "id": "xs",
+    "label": "extra_short",
+    "gen_text": "Good morning."
+  },
+  {
+    "id": "s",
+    "label": "short",
     "gen_text": "The weather is clear today, and the city sounds calm."
   },
   {
-    "id": "medium",
+    "id": "m",
+    "label": "medium",
     "gen_text": "Some call me nature, others call me mother nature. I do not really care what you call me, but I have been here far longer than any of us can remember."
   },
   {
-    "id": "long",
+    "id": "l",
+    "label": "long",
     "gen_text": "I have watched species evolve, empires rise and fall, and generations come and go. Through storms, droughts, and quiet mornings, I remain patient. If you listen closely, you will hear that every forest, river, and mountain is telling the same story about time, change, and endurance."
+  },
+  {
+    "id": "xl",
+    "label": "extra_long",
+    "gen_text": "When people speak about progress, they usually imagine machines, towers, roads, and lights stretching across the horizon. But progress also lives in quieter places: in a child learning to read, in a scientist repeating an experiment until the data finally makes sense, in an artist discovering the exact note that turns technique into feeling, and in a community deciding that patience, trust, and discipline matter more than noise. None of those things happen instantly. They are built in layers, through repeated effort, careful revision, and the willingness to keep going long after the first excitement has faded."
   }
 ]

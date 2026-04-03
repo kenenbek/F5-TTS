@@ -7,6 +7,8 @@ This folder contains a small benchmark harness for comparing:
 
 The benchmark uses the built-in English reference sample from the repo and runs a fixed set of English prompts from [`english_cases.json`](/home/k_arzymatov/PycharmProjects/F5-TTS/benchmarks/english_cases.json).
 
+Unlike the VITS reference benchmark, F5-TTS here uses real English prompts instead of synthetic phoneme tensors. The bundled cases span extra-short through extra-long prompts so you can compare short and long inference behavior with real text.
+
 ## What it measures
 
 The script reports:
@@ -58,3 +60,16 @@ By default, results are written to `benchmarks/results/`:
 
 - `runs.csv`: one row per measured run
 - `summary.json`: aggregated metrics per backend and batch size
+
+## Plotting
+
+```bash
+python benchmarks/plot_benchmark.py benchmarks/results/summary.json
+```
+
+You can also point it at one or more benchmark result files or directories:
+
+```bash
+python benchmarks/plot_benchmark.py benchmarks/results
+python benchmarks/plot_benchmark.py run_a/summary.json run_b/summary.json --output benchmarks/results/benchmark_plots.png
+```

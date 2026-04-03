@@ -1,0 +1,7 @@
+results/
+__pycache__/
+*.wav
+*.csv
+*.jsonl
+*.tmp
+*.png
