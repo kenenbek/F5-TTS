@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Benchmark F5-TTS: true-batched PyTorch (.pth) vs external vLLM command.
+Benchmark F5-TTS: batched (pth) vs sequential (vllm).
 
 Measures latency with proper CUDA synchronisation, percentile stats,
 GPU memory tracking, and OOM handling — modelled after the VITS2 benchmark.
 
 Usage:
-    python benchmark.py --device cuda                           # pth only (default)
-    python benchmark.py --backend pth vllm --vllm-command "..." # compare both
-    python benchmark.py --batch-sizes 1 2 4 8 16 --device cuda  # custom batches
+    python benchmark.py --device cuda                          # both pth and vllm
+    python benchmark.py --backend pth --device cuda            # pth only
+    python benchmark.py --backend vllm --device cuda           # vllm only
+    python benchmark.py --batch-sizes 1 2 4 8 16 --device cuda # custom batches
 """
 
 from __future__ import annotations
@@ -17,17 +18,12 @@ import argparse
 import csv
 import json
 import os
-import shlex
-import subprocess
 import sys
-import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import soundfile as sf
 import torch
 import torchaudio
 
@@ -377,51 +373,48 @@ def benchmark_pth(
 
 
 def benchmark_vllm(
-    command_template: str,
-    ref_audio_path: str,
+    model,
+    vocoder,
+    ref_audio: torch.Tensor,
     ref_text: str,
     gen_text: str,
     batch_sizes: list[int],
+    device: str,
     gpu_id: int,
     num_repeats: int,
     warmup: int,
+    nfe_step: int,
+    cfg_strength: float,
+    sway_sampling_coef: float,
+    seed: int,
 ) -> list[dict[str, Any]]:
     """
-    vLLM benchmark sends requests sequentially (batch_size = number of serial calls).
-
-    This mirrors real serving: each request is an independent subprocess invocation.
+    Sequential baseline: batch_size=N means N separate model.sample() calls
+    with batch_size=1 each.  Shows the cost of not batching.
     """
-    use_cuda = torch.cuda.is_available()
-    device = f"cuda:{gpu_id}" if use_cuda else None
+    use_cuda = str(device).startswith("cuda")
     results = []
 
-    def _run_one() -> float:
-        """Run a single vLLM inference, return latency in ms."""
-        with tempfile.TemporaryDirectory(prefix="f5tts_bench_") as tmp_dir:
-            output_wav = str(Path(tmp_dir) / "out.wav")
-            command = command_template.format(
-                ref_audio=ref_audio_path,
-                ref_text=ref_text,
-                gen_text=gen_text,
-                output_wav=output_wav,
-                ref_audio_q=shlex.quote(ref_audio_path),
-                ref_text_q=shlex.quote(ref_text),
-                gen_text_q=shlex.quote(gen_text),
-                output_wav_q=shlex.quote(output_wav),
+    # Prepare single-sample inputs (reused for every call)
+    cond, text_list, duration = prepare_batch_inputs(
+        model, ref_audio, ref_text, gen_text, batch_size=1
+    )
+    ref_audio_len = ref_audio.shape[-1] // HOP_LENGTH
+
+    def _run_one():
+        with torch.inference_mode():
+            generated, _ = model.sample(
+                cond=cond,
+                text=text_list,
+                duration=duration,
+                steps=nfe_step,
+                cfg_strength=cfg_strength,
+                sway_sampling_coef=sway_sampling_coef,
+                seed=seed,
             )
-            t0 = time.perf_counter()
-            completed = subprocess.run(command, shell=True, check=False, capture_output=True, text=True)
-            t1 = time.perf_counter()
-
-            if completed.returncode != 0:
-                raise RuntimeError(
-                    f"vllm command failed\ncommand: {command}\n"
-                    f"stderr:\n{completed.stderr}"
-                )
-            if not os.path.exists(output_wav):
-                raise FileNotFoundError(f"vllm command did not create {output_wav}")
-
-            return (t1 - t0) * 1000
+            gen_mel = generated[:, ref_audio_len:, :].to(torch.float32).permute(0, 2, 1)
+            _ = vocoder.decode(gen_mel)
+            del generated, gen_mel
 
     for bs in batch_sizes:
         print(f"  vllm     batch_size={bs:>4d} ...", end="", flush=True)
@@ -431,30 +424,42 @@ def benchmark_vllm(
             for _ in range(warmup):
                 for _ in range(bs):
                     _run_one()
-        except Exception as exc:
-            print(f"  error during warmup: {exc}", flush=True)
-            stats = make_oom_stats(bs, "vllm")
-            results.append(stats)
-            continue
+                if use_cuda:
+                    torch.cuda.synchronize()
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower() or "CUDA" in str(exc):
+                print(f"  OOM during warmup: {exc}", flush=True)
+                torch.cuda.empty_cache()
+                stats = make_oom_stats(bs, "vllm")
+                results.append(stats)
+                continue
+            raise
 
         mem_after = get_gpu_memory(device) if use_cuda else None
 
-        # Timed runs — each "run" sends `bs` sequential requests
+        # Timed runs — each run does `bs` sequential single-sample calls
         latencies = []
-        failed = False
+        oom = False
         for _ in range(num_repeats):
             try:
+                if use_cuda:
+                    torch.cuda.synchronize()
                 t0 = time.perf_counter()
                 for _ in range(bs):
                     _run_one()
+                if use_cuda:
+                    torch.cuda.synchronize()
                 t1 = time.perf_counter()
                 latencies.append((t1 - t0) * 1000)
-            except Exception as exc:
-                print(f"  error during run: {exc}", flush=True)
-                failed = True
-                break
+            except RuntimeError as exc:
+                if "out of memory" in str(exc).lower() or "CUDA" in str(exc):
+                    print(f"  OOM during run: {exc}", flush=True)
+                    torch.cuda.empty_cache()
+                    oom = True
+                    break
+                raise
 
-        if failed or len(latencies) == 0:
+        if oom or len(latencies) == 0:
             stats = make_oom_stats(bs, "vllm")
             results.append(stats)
             continue
@@ -507,7 +512,7 @@ def save_json(all_results: list[dict], args: argparse.Namespace, output_dir: str
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Benchmark F5-TTS: true-batched pth vs vllm")
+    p = argparse.ArgumentParser(description="Benchmark F5-TTS: batched (pth) vs sequential (vllm)")
     p.add_argument("--backend", nargs="+", default=["pth", "vllm"], choices=["pth", "vllm"])
     p.add_argument("--model", default="F5TTS_v1_Base")
     p.add_argument("--ckpt-file", default="")
@@ -528,7 +533,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cfg-strength", type=float, default=2.0)
     p.add_argument("--sway-sampling-coef", type=float, default=-1.0)
     p.add_argument("--seed", type=int, default=1234)
-    p.add_argument("--vllm-command", default="")
     p.add_argument("--output-dir", default=str(DEFAULT_RESULTS_DIR))
     p.add_argument("--gpu-id", type=int, default=0)
     p.add_argument("--no-csv", action="store_true")
@@ -556,7 +560,7 @@ def main() -> None:
         device_str = args.device
 
     print(f"\n{'#' * 60}")
-    print(f"# F5-TTS Benchmark (true batching)")
+    print(f"# F5-TTS Benchmark")
     print(f"# device={device_str}  backends={args.backend}")
     print(f"# gen_text ({len(GEN_TEXT)} chars): {GEN_TEXT[:60]}...")
     print(f"# batch_sizes={args.batch_sizes}  repeats={args.repeats}  warmup={args.warmup_runs}")
@@ -572,83 +576,75 @@ def main() -> None:
 
     all_results: list[dict[str, Any]] = []
 
-    # ── PyTorch backend ──
+    # Load model once — shared by pth and vllm backends
+    print(f"\nLoading F5-TTS model ({args.model}) ...")
+    f5tts = F5TTS(
+        model=args.model,
+        ckpt_file=args.ckpt_file,
+        vocab_file=args.vocab_file,
+        ode_method=args.ode_method,
+        vocoder_local_path=args.vocoder_local_path,
+        device=device_str,
+        hf_cache_dir=args.hf_cache_dir,
+    )
+    model = f5tts.ema_model
+    vocoder = f5tts.vocoder
+
+    total_params = sum(p.numel() for p in model.parameters())
+    weight_mb = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024**2
+    print(f"  Parameters: {total_params:,} ({weight_mb:.1f} MB)", flush=True)
+
+    model_loaded_mb = 0.0
+    if use_cuda:
+        mem = get_gpu_memory(device_str)
+        if mem:
+            model_loaded_mb = mem["used_mb"]
+            print(f"  GPU after model load: {model_loaded_mb:.0f} MB used", flush=True)
+
+    ref_audio, _ = prepare_ref_audio(args.ref_audio, device_str)
+    ref_text = args.ref_text
+    if not ref_text.endswith(". ") and not ref_text.endswith("。"):
+        if ref_text.endswith("."):
+            ref_text += " "
+        else:
+            ref_text += ". "
+
+    common_kwargs = dict(
+        model=model,
+        vocoder=vocoder,
+        ref_audio=ref_audio,
+        ref_text=ref_text,
+        gen_text=GEN_TEXT,
+        batch_sizes=args.batch_sizes,
+        device=device_str,
+        gpu_id=gpu_id,
+        num_repeats=args.repeats,
+        warmup=args.warmup_runs,
+        nfe_step=args.nfe_step,
+        cfg_strength=args.cfg_strength,
+        sway_sampling_coef=args.sway_sampling_coef,
+        seed=args.seed,
+    )
+
+    # ── pth: true batching ──
     if "pth" in args.backend:
-        print(f"\nLoading F5-TTS model ({args.model}) ...")
-        f5tts = F5TTS(
-            model=args.model,
-            ckpt_file=args.ckpt_file,
-            vocab_file=args.vocab_file,
-            ode_method=args.ode_method,
-            vocoder_local_path=args.vocoder_local_path,
-            device=device_str,
-            hf_cache_dir=args.hf_cache_dir,
-        )
-        model = f5tts.ema_model
-        vocoder = f5tts.vocoder
-
-        total_params = sum(p.numel() for p in model.parameters())
-        weight_mb = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024**2
-        print(f"  Parameters: {total_params:,} ({weight_mb:.1f} MB)", flush=True)
-
-        model_loaded_mb = 0.0
-        if use_cuda:
-            mem = get_gpu_memory(device_str)
-            if mem:
-                model_loaded_mb = mem["used_mb"]
-                print(f"  GPU after model load: {model_loaded_mb:.0f} MB used", flush=True)
-
-        # Prepare reference audio once
-        ref_audio, _ = prepare_ref_audio(args.ref_audio, device_str)
-        ref_text = args.ref_text
-        if not ref_text.endswith(". ") and not ref_text.endswith("。"):
-            if ref_text.endswith("."):
-                ref_text += " "
-            else:
-                ref_text += ". "
-
-        pth_results = benchmark_pth(
-            model=model,
-            vocoder=vocoder,
-            ref_audio=ref_audio,
-            ref_text=ref_text,
-            gen_text=GEN_TEXT,
-            batch_sizes=args.batch_sizes,
-            device=device_str,
-            gpu_id=gpu_id,
-            num_repeats=args.repeats,
-            warmup=args.warmup_runs,
-            nfe_step=args.nfe_step,
-            cfg_strength=args.cfg_strength,
-            sway_sampling_coef=args.sway_sampling_coef,
-            seed=args.seed,
-        )
+        print(f"\nBenchmarking pth (true batching) ...")
+        pth_results = benchmark_pth(**common_kwargs)
         all_results.extend(pth_results)
 
         if use_cuda:
             print_memory_breakdown(pth_results, model_loaded_mb, baseline_mb, gpu_id)
 
-        del model, vocoder, f5tts
-        if use_cuda:
-            torch.cuda.empty_cache()
-
-    # ── vLLM backend ──
+    # ── vllm: sequential single-sample calls ──
     if "vllm" in args.backend:
-        if not args.vllm_command:
-            print("\nSkipping vllm backend (no --vllm-command provided)")
-        else:
-            print(f"\nBenchmarking vLLM (sequential requests) ...")
-            vllm_results = benchmark_vllm(
-                command_template=args.vllm_command,
-                ref_audio_path=args.ref_audio,
-                ref_text=args.ref_text,
-                gen_text=GEN_TEXT,
-                batch_sizes=args.batch_sizes,
-                gpu_id=gpu_id,
-                num_repeats=args.repeats,
-                warmup=args.warmup_runs,
-            )
-            all_results.extend(vllm_results)
+        print(f"\nBenchmarking vllm (sequential, batch_size=1 per call) ...")
+        vllm_results = benchmark_vllm(**common_kwargs)
+        all_results.extend(vllm_results)
+
+    # Clean up
+    del model, vocoder, f5tts
+    if use_cuda:
+        torch.cuda.empty_cache()
 
     # ── Output ──
     print_table(all_results)

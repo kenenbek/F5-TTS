@@ -2,8 +2,10 @@
 
 Latency and throughput benchmark for F5-TTS comparing:
 
-- **pth** — native PyTorch with **true GPU batching** (single `model.sample()` call per batch)
-- **vllm** — external vLLM runtime (sequential subprocess calls)
+- **pth** — true GPU batching (single `model.sample()` call with batch_size=N)
+- **vllm** — sequential baseline (N separate `model.sample()` calls with batch_size=1)
+
+Both backends run by default — just run `python benchmark.py --device cuda`.
 
 ## Design
 
@@ -12,7 +14,7 @@ The benchmark follows the same methodology as the
 
 | Property | Detail |
 |---|---|
-| **Batching** | True tensor batching — one forward pass per batch, not N serial calls |
+| **Batching** | True tensor batching (pth) vs N serial calls (vllm) — shows batching speedup |
 | **Input** | Fixed-length English text (~53 chars), same for every sample in a batch |
 | **GPU timing** | `torch.cuda.synchronize()` before and after each timed run |
 | **Stats** | mean, std, min, max, p50, p95, p99 (milliseconds) |
@@ -20,46 +22,20 @@ The benchmark follows the same methodology as the
 | **OOM handling** | Catches CUDA OOM, records it, continues to next batch size |
 | **Warmup** | Configurable warmup runs (default 3) before timed measurements |
 
-For pth, `batch_size=N` means N samples are packed into a single tensor and
-processed in one `model.sample()` call.  For vllm, `batch_size=N` means N
-sequential subprocess invocations (reflecting real serving latency).
-
 ## Quick start
 
-### Default (both backends)
-
-By default the script benchmarks **both** pth and vllm.  If `--vllm-command`
-is not provided, vllm is skipped with a message.
-
 ```bash
-# Runs pth, skips vllm (no command given)
+# Both backends (default)
 python benchmarks/benchmark.py --device cuda
 
-# Runs both pth and vllm
-python benchmarks/benchmark.py --device cuda \
-  --vllm-command 'python your_vllm_infer.py \
-      --ref-audio {ref_audio_q} --ref-text {ref_text_q} \
-      --gen-text {gen_text_q} --output {output_wav_q}'
-```
-
-### Single backend
-
-```bash
-# PyTorch only
+# pth only
 python benchmarks/benchmark.py --backend pth --device cuda
 
-# vLLM only
-python benchmarks/benchmark.py --backend vllm --device cuda \
-  --vllm-command '...'
-```
+# vllm only
+python benchmarks/benchmark.py --backend vllm --device cuda
 
-### Custom text / model
-
-```bash
-python benchmarks/benchmark.py \
-  --device cuda \
-  --model F5TTS_v1_Base \
-  --ckpt-file /path/to/model_1250000.safetensors \
+# Custom text / batch sizes
+python benchmarks/benchmark.py --device cuda \
   --gen-text "A custom sentence of roughly fifty characters long." \
   --batch-sizes 1 2 4 8 16 32 64 \
   --repeats 20 --warmup-runs 5
@@ -82,20 +58,10 @@ python benchmarks/benchmark.py \
 | `--cfg-strength` | `2.0` | Classifier-free guidance strength |
 | `--sway-sampling-coef` | `-1.0` | Sway sampling coefficient |
 | `--seed` | `1234` | Random seed |
-| `--vllm-command` | `""` | Shell command template (vllm skipped if not provided) |
 | `--output-dir` | `benchmarks/results/` | Output directory |
 | `--gpu-id` | `0` | GPU device index |
 | `--no-csv` | off | Skip CSV output |
 | `--no-json` | off | Skip JSON output |
-
-### vllm command placeholders
-
-| Placeholder | Description |
-|---|---|
-| `{ref_audio}` / `{ref_audio_q}` | Reference audio path (raw / shell-quoted) |
-| `{ref_text}` / `{ref_text_q}` | Reference transcript (raw / shell-quoted) |
-| `{gen_text}` / `{gen_text_q}` | Generation text (raw / shell-quoted) |
-| `{output_wav}` / `{output_wav_q}` | Output wav path (raw / shell-quoted) |
 
 ## Outputs
 
@@ -108,9 +74,10 @@ Results are written to `benchmarks/results/` (configurable):
 
 ```
 format,batch_size,mean,std,min,max,p50,p95,p99,gpu_used_mb,oom
-pth,1,620.3,12.1,605.2,648.7,618.5,640.1,646.3,2048.5,
-pth,2,645.8,15.3,628.1,672.4,643.2,668.9,671.2,2156.3,
-pth,4,710.2,18.7,688.3,745.1,707.6,739.8,743.4,2384.1,
+pth,1,653.3,9.0,490.7,740.6,686.1,722.3,736.9,7650.0,
+pth,4,1372.6,8.6,1358.0,1387.0,1373.2,1386.1,1386.8,7888.0,
+vllm,1,655.1,10.2,640.3,672.8,654.0,670.1,671.9,7650.0,
+vllm,4,2610.4,15.3,2588.1,2638.7,2609.2,2633.1,2637.6,7650.0,
 ```
 
 ## Plotting
@@ -124,12 +91,6 @@ Compare multiple runs:
 ```bash
 python benchmarks/plot_benchmark.py run_a/benchmark.json run_b/benchmark.json \
     --output comparison.png --title "pth vs vllm"
-```
-
-Point at a directory (looks for `benchmark.json` inside):
-
-```bash
-python benchmarks/plot_benchmark.py benchmarks/results/
 ```
 
 The plot produces four panels:
