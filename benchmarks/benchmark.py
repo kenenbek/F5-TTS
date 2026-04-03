@@ -244,22 +244,31 @@ def run_single_batch(
     start = time.perf_counter()
     request_latencies = []
     audio_durations = []
+    errors = []
 
     for idx in range(batch_size):
         case = cases[idx % len(cases)]
-        metrics = backend.infer(ref_audio=ref_audio, ref_text=ref_text, gen_text=case.gen_text)
+        try:
+            metrics = backend.infer(ref_audio=ref_audio, ref_text=ref_text, gen_text=case.gen_text)
+        except RuntimeError as exc:
+            errors.append({"case_id": case.case_id, "error": str(exc)})
+            print(f"    [ERROR] case '{case.case_id}' failed: {exc}")
+            continue
         request_latencies.append(metrics["latency_sec"])
         audio_durations.append(metrics["audio_duration_sec"])
 
     batch_latency_sec = time.perf_counter() - start
     total_audio_sec = sum(audio_durations)
+    successful = len(request_latencies)
     return {
         "batch_latency_sec": batch_latency_sec,
         "requests_in_batch": batch_size,
-        "avg_request_latency_sec": statistics.mean(request_latencies),
+        "successful_requests": successful,
+        "errors": errors,
+        "avg_request_latency_sec": statistics.mean(request_latencies) if request_latencies else None,
         "total_audio_sec": total_audio_sec,
         "rtf": batch_latency_sec / total_audio_sec if total_audio_sec > 0 else None,
-        "requests_per_sec": batch_size / batch_latency_sec if batch_latency_sec > 0 else None,
+        "requests_per_sec": successful / batch_latency_sec if batch_latency_sec > 0 and successful > 0 else None,
     }
 
 
@@ -274,15 +283,18 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         batch_latencies = [row["batch_latency_sec"] for row in group_rows]
         total_audio = sum(row["total_audio_sec"] for row in group_rows)
         total_time = sum(row["batch_latency_sec"] for row in group_rows)
+        total_errors = sum(len(row.get("errors", [])) for row in group_rows)
+        rps_values = [row["requests_per_sec"] for row in group_rows if row["requests_per_sec"] is not None]
         summary.append(
             {
                 "backend": backend,
                 "batch_size": batch_size,
                 "runs": len(group_rows),
+                "total_errors": total_errors,
                 "avg_batch_latency_sec": statistics.mean(batch_latencies),
                 "min_batch_latency_sec": min(batch_latencies),
                 "max_batch_latency_sec": max(batch_latencies),
-                "avg_requests_per_sec": statistics.mean(row["requests_per_sec"] for row in group_rows),
+                "avg_requests_per_sec": statistics.mean(rps_values) if rps_values else 0.0,
                 "overall_rtf": total_time / total_audio if total_audio > 0 else None,
             }
         )
@@ -293,6 +305,11 @@ def write_outputs(output_dir: Path, rows: list[dict[str, Any]], summary_rows: li
     output_dir.mkdir(parents=True, exist_ok=True)
 
     csv_path = output_dir / "runs.csv"
+    csv_rows = []
+    for row in rows:
+        csv_row = {k: v for k, v in row.items() if k != "errors"}
+        csv_row["error_count"] = len(row.get("errors", []))
+        csv_rows.append(csv_row)
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
@@ -302,14 +319,16 @@ def write_outputs(output_dir: Path, rows: list[dict[str, Any]], summary_rows: li
                 "repeat",
                 "batch_latency_sec",
                 "requests_in_batch",
+                "successful_requests",
                 "avg_request_latency_sec",
                 "total_audio_sec",
                 "rtf",
                 "requests_per_sec",
+                "error_count",
             ],
         )
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(csv_rows)
 
     json_path = output_dir / "summary.json"
     with open(json_path, "w", encoding="utf-8") as f:
@@ -319,16 +338,19 @@ def write_outputs(output_dir: Path, rows: list[dict[str, Any]], summary_rows: li
 def print_summary(summary_rows: list[dict[str, Any]]) -> None:
     print("\nSummary")
     print(
-        f"{'backend':<10} {'batch':>5} {'runs':>5} {'avg_batch_s':>12} {'req/s':>10} {'overall_rtf':>12}"
+        f"{'backend':<10} {'batch':>5} {'runs':>5} {'errors':>7} {'avg_batch_s':>12} {'req/s':>10} {'overall_rtf':>12}"
     )
     for row in summary_rows:
+        rtf = row["overall_rtf"]
+        rtf_str = f"{rtf:>12.4f}" if rtf is not None else f"{'N/A':>12}"
         print(
             f"{row['backend']:<10} "
             f"{row['batch_size']:>5d} "
             f"{row['runs']:>5d} "
+            f"{row['total_errors']:>7d} "
             f"{row['avg_batch_latency_sec']:>12.4f} "
             f"{row['avg_requests_per_sec']:>10.3f} "
-            f"{row['overall_rtf']:>12.4f}"
+            f"{rtf_str}"
         )
 
 
@@ -373,12 +395,17 @@ def main() -> None:
                     **metrics,
                 }
                 rows.append(row)
+                rps = metrics["requests_per_sec"]
+                rtf = metrics["rtf"]
+                err_count = len(metrics.get("errors", []))
+                err_suffix = f" errors={err_count}" if err_count else ""
                 print(
                     "    repeat "
                     f"{repeat_idx + 1}/{args.repeats}: "
                     f"batch={metrics['batch_latency_sec']:.4f}s "
-                    f"req/s={metrics['requests_per_sec']:.3f} "
-                    f"rtf={metrics['rtf']:.4f}"
+                    f"req/s={f'{rps:.3f}' if rps is not None else 'N/A'} "
+                    f"rtf={f'{rtf:.4f}' if rtf is not None else 'N/A'}"
+                    f"{err_suffix}"
                 )
 
     summary_rows = summarize(rows)
