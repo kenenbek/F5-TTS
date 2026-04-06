@@ -95,8 +95,8 @@ def group_by_format(results: list[dict]) -> dict[str, list[dict]]:
 
 # ── Plotting ────────────────────────────────────────────────────────────────
 
-COLORS = {"pth": "#1f77b4", "vllm": "#ff7f0e", "onnx": "#2ca02c", "tensorrt": "#d62728"}
-MARKERS = {"pth": "o", "vllm": "s", "onnx": "^", "tensorrt": "D"}
+COLORS = {"pth": "#1f77b4", "trtllm": "#d62728", "onnx": "#2ca02c", "vllm": "#ff7f0e"}
+MARKERS = {"pth": "o", "trtllm": "D", "onnx": "^", "vllm": "s"}
 
 
 def _style(fmt: str):
