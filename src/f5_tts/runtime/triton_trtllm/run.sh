@@ -17,7 +17,7 @@ MODEL_REPO=./model_repo
 
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
     echo "Downloading F5-TTS from huggingface"
-    huggingface-cli download SWivid/F5-TTS $model/model_*.* $model/vocab.txt --local-dir $CKPT_DIR
+    hf download SWivid/F5-TTS $model/model_*.* $model/vocab.txt --local-dir $CKPT_DIR
 fi
 
 ckpt_file=$(ls $CKPT_DIR/$model/model_*.* 2>/dev/null | sort -V | tail -1)  # default select latest update
