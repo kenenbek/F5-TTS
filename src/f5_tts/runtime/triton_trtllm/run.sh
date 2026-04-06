@@ -28,6 +28,7 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
     python3 scripts/convert_checkpoint.py \
         --pytorch_ckpt $ckpt_file \
         --output_dir $TRTLLM_CKPT_DIR --model_name $model
+    echo "Converting checkpoint"
     python_package_path=/usr/local/lib/python3.12/dist-packages
     cp -r patch/* $python_package_path/tensorrt_llm/models
     trtllm-build --checkpoint_dir $TRTLLM_CKPT_DIR \
